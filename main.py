@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import firebase_admin
@@ -8,6 +8,7 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
+from pydantic import BaseModel
 
 # Firebase 초기화
 cred = credentials.Certificate(
@@ -28,7 +29,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # JWT 설정
 load_dotenv()
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -48,6 +48,27 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+
+# JWT 검증 함수
+def verify_jwt(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
+
+    token = auth_header.split(" ")[1]  # "Bearer " 뒤의 토큰 부분 추출
+
+    try:
+        # JWT 디코딩 및 검증
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user = {"uid": payload.get("sub"), "email": payload.get("email")}
+        if not user["uid"]:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.JWTError as e:
+        raise HTTPException(status_code=401, detail=f"Token verification failed: {e}")
 
 
 # 사용자 등록
@@ -135,4 +156,61 @@ async def search_stocks(query: str, token: str = Depends(oauth2_scheme)):
         }
     except Exception as e:
         print(f"Error: {e}")  # 서버에서 에러 로그 확인
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 데이터 모델 정의
+class AddStockRequest(BaseModel):
+    symbol: str
+
+
+# 검색한 주식 저장
+@app.post("/portfolio")
+async def add_to_portfolio(stock: AddStockRequest, user: dict = Depends(verify_jwt)):
+    try:
+        db = firestore.client()
+        user_ref = db.collection("users").document(user["uid"])
+
+        # symbol 값을 문서 ID로 설정하여 저장
+        user_ref.collection("portfolio").document(stock.symbol).set(
+            {"symbol": stock.symbol}
+        )
+
+        return {"message": "Stock added to portfolio"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 포트폴리오로 불러오기
+@app.get("/portfolio")
+async def get_portfolio(user: dict = Depends(verify_jwt)):
+    try:
+        db = firestore.client()
+        user_ref = db.collection("users").document(user["uid"])
+        portfolio_ref = user_ref.collection("portfolio")
+        portfolio_docs = portfolio_ref.stream()
+
+        # 포트폴리오 데이터를 리스트로 변환
+        portfolio = []
+        for doc in portfolio_docs:
+            portfolio.append(doc.to_dict())
+
+        return {"portfolio": portfolio}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 포트폴리오 주식 삭제
+@app.delete("/portfolio/{symbol}")
+async def delete_from_portfolio(symbol: str, user: dict = Depends(verify_jwt)):
+    try:
+        db = firestore.client()
+        user_ref = db.collection("users").document(user["uid"])
+        portfolio_ref = user_ref.collection("portfolio").document(symbol)
+
+        # 문서 삭제
+        portfolio_ref.delete()
+
+        return {"message": f"Stock {symbol} deleted from portfolio"}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
