@@ -104,13 +104,13 @@ async def search_stocks(query: str, token: str = Depends(oauth2_scheme)):
             raise HTTPException(status_code=400, detail="Query parameter is required")
 
         # JWT에서 사용자 정보 추출
-        # try:
-        #     payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        #     uid: str = payload.get("uid")
-        #     if uid is None:
-        #         raise HTTPException(status_code=401, detail="Invalid token")
-        # except JWTError:
-        #     raise HTTPException(status_code=401, detail="Invalid token")
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            uid: str = payload.get("uid")
+            if uid is None:
+                raise HTTPException(status_code=401, detail="Invalid token")
+        except JWTError:
+            raise HTTPException(status_code=401, detail="Invalid token")
 
         # yfinance를 사용하여 주식 데이터를 검색
         ticker = yf.Ticker(query)
