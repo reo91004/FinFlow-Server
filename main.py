@@ -247,67 +247,73 @@ async def add_stock_to_portfolio(
 
 
 def get_portfolio_calculation(user_email: str):
-    # 이 씨발 파이어베이스 개쓰레기
-    purchases_query = db.collection_group("purchases")
+    # purchases 컬렉션 그룹에서 해당 유저의 purchase 데이터 가져오기
+    purchases_query = db.collection_group("purchases").where("email", "==", user_email)
     purchases_docs = list(purchases_query.stream())
 
-    # purchases 데이터가 비어 있을 경우 처리
     if not purchases_docs:
         print(f"No purchases found for user {user_email}.")
         return []
 
-    # 데이터를 처리하여 포트폴리오 생성
+    # 심볼별로 데이터 누적
     portfolio_data = {}
+    symbol_currency = {}
+
     for doc in purchases_docs:
         data = doc.to_dict()
         symbol = data.get("symbol")
         quantity = data.get("quantity", 0)
         price = data.get("price", 0.0)
+        currency = data.get("currency", "USD")
 
-        # 포트폴리오에 심볼별로 데이터 누적
         if symbol not in portfolio_data:
             portfolio_data[symbol] = {
                 "total_quantity": 0,
                 "total_cost": 0.0,
             }
+            symbol_currency[symbol] = currency
 
         portfolio_data[symbol]["total_quantity"] += quantity
         portfolio_data[symbol]["total_cost"] += quantity * price
 
-    # 결과를 저장할 리스트
     portfolio = []
 
-    # 심볼별로 계산하여 결과 생성
     for symbol, data in portfolio_data.items():
         total_quantity = data["total_quantity"]
         total_cost = data["total_cost"]
 
-        # 총 수량이 0인 경우 건너뛰기
         if total_quantity == 0:
             continue
 
-        # 평균 구매 가격 계산
         buy_price = total_cost / total_quantity
 
-        # yfinance로 현재 데이터 가져오기
         ticker = yf.Ticker(symbol)
-        info = ticker.info
+        # 최근 2일 간의 종가 가져오기
+        history = ticker.history(period="2d")
+        if len(history) < 2:
+            # 데이터 부족 시 현재가와 이전 종가를 구매가로 fallback
+            current_price = buy_price
+            prev_close = buy_price
+        else:
+            current_price = history["Close"].iloc[-1]
+            prev_close = history["Close"].iloc[-2]
 
-        current_price = info.get("regularMarketPrice", buy_price)
+        # 배당 관련 정보
+        info = ticker.info
         dividend = info.get("dividendRate", 0.0)
         dividend_yield = (
             (info.get("dividendYield", 0.0) * 100) if info.get("dividendYield") else 0.0
         )
-        daily_change = info.get("regularMarketChange", 0.0)
 
+        # 총 수익 및 일간 수익 계산
         total_profit = (current_price - buy_price) * total_quantity
-        daily_profit = daily_change * total_quantity
+        daily_profit = (current_price - prev_close) * total_quantity
 
-        # 로고 URL 및 이름 설정 (get_logo_url 구현 필요)
+        # 로고 및 기업명
         logo_url = get_logo_url(symbol) or "https://via.placeholder.com/50"
         name = info.get("longName", symbol)
+        currency = symbol_currency.get(symbol, "USD")
 
-        # 결과 추가
         portfolio.append(
             {
                 "logo": logo_url,
@@ -321,10 +327,37 @@ def get_portfolio_calculation(user_email: str):
                 "dividendYield": round(dividend_yield, 2),
                 "totalProfit": round(total_profit, 2),
                 "dailyProfit": round(daily_profit, 2),
+                "currency": currency,
             }
         )
 
     return portfolio
+
+
+@app.get("/stockPrice")
+async def get_stock_price(ticker: str, token: str = Depends(oauth2_scheme)):
+    # 토큰 검증
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        uid: Optional[str] = payload.get("uid")
+        if not uid:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # yfinance로 현재가 가져오기
+    try:
+        ticker = yf.Ticker(ticker)
+        info = ticker.info
+        history = ticker.history(period="5d")
+        current_price = info.get("currentPrice") or (
+            history["Close"].iloc[-1] if not history.empty else None
+        )
+        print(round(float(current_price), 2))
+        return round(float(current_price), 2)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching price: {str(e)}")
 
 
 @app.get("/portfolio")
